@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""抓取公开 IPTV 源 → 归类 → 去重 → 探活 → 输出 live.m3u / live.txt
+"""抓取公开 IPTV 源 → 归一化命名 → 归类 → 去重 → 探活 → 输出 live.m3u / live.txt
 
 GitHub Actions 每天跑一次。只用标准库。
 """
@@ -17,9 +17,7 @@ CTX.verify_mode = ssl.CERT_NONE
 TIMEOUT = 8
 WORKERS = 24
 
-# 源1：分组标记清晰的国内 txt
 SRC_TXT = "https://raw.githubusercontent.com/vbskycn/iptv/master/tv/iptv4.txt"
-# 源2：iptv-org 的中国列表（m3u）
 SRC_M3U = "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/cn.m3u"
 
 GROUP_MAP = {
@@ -28,13 +26,14 @@ GROUP_MAP = {
     "数字频道": "其他",
     "儿童频道": "其他",
     "纪录频道": "其他",
-    "体育频道": "其他",
     "音乐频道": "其他",
-    "春晚频道": "其他",
-    # 电影频道（多为点播片）、直播中国（景区）、更新时间 一律不要
+    # 电影频道(点播)、春晚频道(回放)、直播中国(景区)、更新时间、地方频道 都不要
 }
 
-DROP_NAME = re.compile(r"支持作者|更新时间|www\.|^https?://|^央视$|^卫视$|^其他$|春晚|^\d{4}$")
+DROP_NAME = re.compile(
+    r"支持作者|更新时间|www\.|^https?://|^央视$|^卫视$|^其他$|^江西$"
+    r"|中央电视塔|^\d{4}-\d{2}-\d{2}|^\d{4}年春晚"
+)
 
 
 def fetch(url, timeout=40):
@@ -61,9 +60,8 @@ def parse_txt(text):
         if line.startswith("#") or "," not in line:
             continue
         name, url = line.split(",", 1)
-        name, url = name.strip(), url.strip()
-        if name and url.startswith("http"):
-            out.append((name, url, group))
+        if name.strip() and url.strip().startswith("http"):
+            out.append((name.strip(), url.strip(), group))
     return out
 
 
@@ -82,24 +80,27 @@ def parse_m3u(text):
     return out
 
 
-def clean_name(name):
-    """去掉 (1080p)、(720p)、[Not 24/7] 之类的后缀"""
-    n = re.sub(r"\s*[\(\[][^\)\]]*(p|i|24/7|Geo-blocked|Geo|multi|SD|HD)[^\)\]]*[\)\]]",
-               "", name, flags=re.I)
-    return n.strip()
+def norm(name):
+    """统一命名：CCTV-1 / CCTV 1 / CCTV1 → CCTV1"""
+    n = name.strip().rstrip("\r")
+    n = re.sub(r"CCTV[\s\-_]*(\d+)(\s*\+)?",
+               lambda m: f"CCTV{m.group(1)}" + ("+" if m.group(2) else ""),
+               n, flags=re.I)
+    n = re.sub(r"\s*[\(\[]\s*(1080|720|576|480|2160)\s*[pi]?\s*[\)\]]", "", n, flags=re.I)
+    n = re.sub(r"\s*[\(\[]\s*(geo-blocked|not 24/7|multi|sd|hd|uhd)\s*[\)\]]", "", n, flags=re.I)
+    n = re.sub(r"\s{2,}", " ", n)
+    return n.strip(" ,-")
 
 
 def classify(name, group):
-    if group in GROUP_MAP:
-        return GROUP_MAP[group]
-    if group == "地方频道":
-        return "江西" if "江西" in name else None   # 地方小台噪声大，不要
+    # 来源自带分组：只认映射表里的，其余（电影/春晚/直播中国/地方频道等）一律丢弃
+    if group is not None:
+        return GROUP_MAP.get(group)
+    # 没有分组（m3u 源）：按名字判断
     if re.search(r"CCTV|CGTN|中央", name, re.I):
         return "央视"
     if "卫视" in name:
         return "卫视"
-    if "江西" in name:
-        return "江西"
     return "其他"
 
 
@@ -113,15 +114,27 @@ def alive(url):
 
 
 def cctv_key(name):
-    if re.search(r"(4K|8K)", name, re.I):
-        return 950
-    if re.search(r"5\s*\+", name):
-        return 900
-    m = re.search(r"CCTV\s*-?\s*(\d+)", name, re.I)
-    return int(m.group(1)) if m else 800
+    """CCTV1..17 → 5+ → CGTN → 4K/8K"""
+    u = name.upper()
+    m = re.match(r"CCTV\s*(\d+)(\+)?", name, re.I)
+    if m:
+        if m.group(2):
+            return 900
+        if "4K" in u:
+            return 970
+        if "8K" in u:
+            return 980
+        return int(m.group(1))
+    if "CGTN" in u:
+        return 910
+    if "8K" in u:
+        return 980
+    if "4K" in u:
+        return 970
+    return 920
 
 
-def collect():
+def main():
     seen = {}
 
     def add(name, url, group, src):
@@ -129,23 +142,23 @@ def collect():
             return
         if "geo-blocked" in name.lower():
             return
-        name = clean_name(name)
+        name = norm(name)
         if not name:
             return
         target = classify(name, group)
         if not target:
             return
-        # iptv-org 只贡献央视和卫视，其余杂项不要
+        # iptv-org 只补央视和卫视，其他杂项不要
         if src == 2 and target not in ("央视", "卫视"):
             return
-        key = url.split("?")[0]
+        key = url.split("?")[0].rstrip("/")
         if key in seen:
             return
         seen[key] = (name, url, target, src)
 
     try:
         items = parse_txt(fetch(SRC_TXT))
-        print(f"[OK] vbskycn → {len(items)} 条")
+        print(f"[OK] vbskycn → {len(items)}")
         for n, u, g in items:
             add(n, u, g, 1)
     except Exception as e:
@@ -153,19 +166,13 @@ def collect():
 
     try:
         items = parse_m3u(fetch(SRC_M3U))
-        print(f"[OK] iptv-org → {len(items)} 条")
+        print(f"[OK] iptv-org → {len(items)}")
         for n, u, g in items:
             add(n, u, g, 2)
     except Exception as e:
         print(f"[FAIL] iptv-org → {e}")
 
-    return seen
-
-
-def main():
-    seen = collect()
-    print(f"筛选后 {len(seen)} 条，开始探活…")
-
+    print(f"筛选后 {len(seen)}，探活中…")
     keys = list(seen.keys())
     keep = set()
     with ThreadPoolExecutor(max_workers=WORKERS) as ex:
@@ -176,18 +183,23 @@ def main():
             if f.result():
                 keep.add(futs[f])
             if done % 80 == 0:
-                print(f"  探测 {done}/{len(keys)} 可用 {len(keep)}")
+                print(f"  {done}/{len(keys)} 可用 {len(keep)}")
 
     rows = [seen[k] for k in keys if k in keep]
-    print(f"可用 {len(rows)} 条")
+    print(f"可用 {len(rows)}")
 
     groups = {"央视": [], "卫视": [], "江西": [], "其他": []}
     for name, url, target, src in rows:
         groups[target].append((name, url, src))
-    # 央视按编号；其余按名称；同名的国内源排前面
-    groups["央视"].sort(key=lambda x: (cctv_key(x[0]), x[2], x[0]))
+
+    groups["央视"].sort(key=lambda x: (cctv_key(x[0]), x[0], x[2]))
     for g in ("卫视", "江西", "其他"):
         groups[g].sort(key=lambda x: (x[0], x[2]))
+
+    # 江西卫视同时出现在「卫视」和「江西」两个分组
+    jx = [r for r in groups["卫视"] if r[0].startswith("江西")]
+    if jx and not groups["江西"]:
+        groups["江西"] = list(jx)
 
     order = ["央视", "卫视", "江西", "其他"]
     with open("live.m3u", "w", encoding="utf-8") as f:
@@ -204,6 +216,8 @@ def main():
                     f.write(f"{name},{url}\n")
 
     print("统计:", {g: len(v) for g, v in groups.items()})
+    print("央视频道:", sorted({r[0] for r in groups["央视"]}, key=cctv_key))
+    print("卫视频道数:", len({r[0] for r in groups["卫视"]}))
 
 
 if __name__ == "__main__":
