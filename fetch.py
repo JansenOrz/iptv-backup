@@ -23,16 +23,17 @@ SRC_M3U = "https://raw.githubusercontent.com/iptv-org/iptv/master/streams/cn.m3u
 GROUP_MAP = {
     "央视频道": "央视",
     "卫视频道": "卫视",
+    "春晚频道": "历年春晚",
     "数字频道": "其他",
     "儿童频道": "其他",
     "纪录频道": "其他",
     "音乐频道": "其他",
-    # 电影频道(点播)、春晚频道(回放)、直播中国(景区)、更新时间、地方频道 都不要
+    # 电影频道(点播片)、直播中国(景区)、更新时间、地方频道 都不要
 }
 
 DROP_NAME = re.compile(
     r"支持作者|更新时间|www\.|^https?://|^央视$|^卫视$|^其他$|^江西$"
-    r"|中央电视塔|^\d{4}-\d{2}-\d{2}|^\d{4}年春晚"
+    r"|中央电视塔|^\d{4}-\d{2}-\d{2}"
 )
 
 
@@ -188,11 +189,16 @@ def main():
     rows = [seen[k] for k in keys if k in keep]
     print(f"可用 {len(rows)}")
 
-    groups = {"央视": [], "卫视": [], "江西": [], "其他": []}
+    groups = {"央视": [], "卫视": [], "江西": [], "历年春晚": [], "其他": []}
     for name, url, target, src in rows:
         groups[target].append((name, url, src))
 
+    def year_key(name):
+        m = re.search(r"(\d{4})", name)
+        return int(m.group(1)) if m else 9999
+
     groups["央视"].sort(key=lambda x: (cctv_key(x[0]), x[0], x[2]))
+    groups["历年春晚"].sort(key=lambda x: (year_key(x[0]), x[0]))
     for g in ("卫视", "江西", "其他"):
         groups[g].sort(key=lambda x: (x[0], x[2]))
 
@@ -201,7 +207,7 @@ def main():
     if jx and not groups["江西"]:
         groups["江西"] = list(jx)
 
-    order = ["央视", "卫视", "江西", "其他"]
+    order = ["央视", "卫视", "江西", "历年春晚", "其他"]
     with open("live.m3u", "w", encoding="utf-8") as f:
         f.write("#EXTM3U\n")
         for g in order:
